@@ -22,12 +22,95 @@
 #include "gpgpu.h"
 #include "gpgpu_core.h"
 
+/* 设备标识值 */
+#define GPGPU_DEV_ID_VALUE          0x47505055  /* "GPPU" */
+#define GPGPU_DEV_VERSION_VALUE     0x00010000  /* v1.0.0 */
+
+static void gpgpu_soft_reset(GPGPUState *s)
+{
+    s->global_ctrl = 0;
+    s->global_status = GPGPU_STATUS_READY;
+    s->error_status = 0;
+    s->irq_enable = 0;
+    s->irq_status = 0;
+    memset(&s->kernel, 0, sizeof(s->kernel));
+    memset(&s->dma, 0, sizeof(s->dma));
+    memset(&s->simt, 0, sizeof(s->simt));
+    // @todo: del timer?
+    // timer_del(s->dma_timer);
+    // timer_del(s->kernel_timer);
+}
+
 /* TODO: Implement MMIO control register read */
 static uint64_t gpgpu_ctrl_read(void *opaque, hwaddr addr, unsigned size)
 {
-    (void)opaque;
-    (void)addr;
-    (void)size;
+    GPGPUState *s = GPGPU(opaque);
+    if (size != sizeof(uint32_t)) {
+        qemu_log_mask(LOG_GUEST_ERROR, "size is not %ld",  sizeof(uint32_t));
+        return 0;
+    }
+    uint64_t lo_mask = (1UL<<32)-1;
+    switch (addr)
+    {
+    case GPGPU_REG_DEV_ID:
+        return GPGPU_DEV_ID_VALUE;
+    case GPGPU_REG_DEV_VERSION:
+        return GPGPU_DEV_VERSION_VALUE;
+    case GPGPU_REG_VRAM_SIZE_LO:
+        return s->vram_size & 0xffffffff;
+    case GPGPU_REG_VRAM_SIZE_HI:
+        return (s->vram_size>>32) & 0xffffffff;
+    case GPGPU_REG_GLOBAL_STATUS:
+        return s->global_status;
+    case GPGPU_REG_GLOBAL_CTRL:
+        return s->global_ctrl;
+    case GPGPU_REG_GRID_DIM_X:
+        return s->kernel.grid_dim[0];
+    case GPGPU_REG_GRID_DIM_Y:
+        return s->kernel.grid_dim[1];
+    case GPGPU_REG_GRID_DIM_Z:
+        return s->kernel.grid_dim[2];
+    case GPGPU_REG_BLOCK_DIM_X:
+        return s->kernel.block_dim[0];
+    case GPGPU_REG_BLOCK_DIM_Y:
+        return s->kernel.block_dim[1];
+    case GPGPU_REG_BLOCK_DIM_Z:
+        return s->kernel.block_dim[2];
+    case GPGPU_REG_DMA_SRC_LO:
+        return s->dma.src_addr & lo_mask;
+    case GPGPU_REG_DMA_SRC_HI:
+        return (s->dma.src_addr>>32) & lo_mask;
+    case GPGPU_REG_DMA_DST_LO:
+        return s->dma.dst_addr & lo_mask;
+    case GPGPU_REG_DMA_DST_HI:
+        return (s->dma.dst_addr>>32) & lo_mask;
+    case GPGPU_REG_DMA_SIZE:
+        return s->dma.size;
+    case GPGPU_REG_IRQ_ENABLE:
+        return s->irq_enable;
+    case GPGPU_REG_IRQ_STATUS:
+        return s->irq_status;
+    case GPGPU_REG_THREAD_ID_X:
+        return s->simt.thread_id[0];
+    case GPGPU_REG_THREAD_ID_Y:
+        return s->simt.thread_id[1];
+    case GPGPU_REG_THREAD_ID_Z:
+        return s->simt.thread_id[2];
+    case GPGPU_REG_BLOCK_ID_X:
+        return s->simt.block_id[0];
+    case GPGPU_REG_BLOCK_ID_Y:
+        return s->simt.block_id[1];
+    case GPGPU_REG_BLOCK_ID_Z:
+        return s->simt.block_id[2];
+    case GPGPU_REG_WARP_ID:
+        return s->simt.warp_id;
+    case GPGPU_REG_LANE_ID:
+        return s->simt.lane_id;
+    case GPGPU_REG_THREAD_MASK:
+        return s->simt.thread_mask;
+    default:
+        break;
+    }
     return 0;
 }
 
@@ -35,10 +118,94 @@ static uint64_t gpgpu_ctrl_read(void *opaque, hwaddr addr, unsigned size)
 static void gpgpu_ctrl_write(void *opaque, hwaddr addr, uint64_t val,
                              unsigned size)
 {
-    (void)opaque;
-    (void)addr;
-    (void)val;
-    (void)size;
+    GPGPUState *s = GPGPU(opaque);
+    if (size != sizeof(uint32_t)) {
+        qemu_log_mask(LOG_GUEST_ERROR, "size is not %ld",  sizeof(uint32_t));
+    }
+    uint64_t lo_mask = (1UL<<32)-1;
+    uint64_t hi_mask = ~lo_mask;
+    switch (addr)
+    {
+    case GPGPU_REG_GLOBAL_CTRL:
+        s->global_ctrl = (uint32_t)val;
+        if (s->global_ctrl & GPGPU_CTRL_RESET) {
+            gpgpu_soft_reset(s);
+            s->global_ctrl &= ~GPGPU_CTRL_RESET;
+        }
+        break;
+    case GPGPU_REG_GRID_DIM_X:
+        s->kernel.grid_dim[0] = (uint32_t)val;
+        break;
+    case GPGPU_REG_GRID_DIM_Y:
+        s->kernel.grid_dim[1] = (uint32_t)val;
+        break;
+    case GPGPU_REG_GRID_DIM_Z:
+        s->kernel.grid_dim[2] = (uint32_t)val;
+        break;
+    case GPGPU_REG_BLOCK_DIM_X:
+        s->kernel.block_dim[0] = (uint32_t)val;
+        break;
+    case GPGPU_REG_BLOCK_DIM_Y:
+        s->kernel.block_dim[1] = (uint32_t)val;
+        break;
+    case GPGPU_REG_BLOCK_DIM_Z:
+        s->kernel.block_dim[2] = (uint32_t)val;
+        break;
+    case GPGPU_REG_DMA_SRC_LO:
+        s->dma.src_addr = (s->dma.src_addr & hi_mask) + (val & lo_mask);
+        break;
+    case GPGPU_REG_DMA_SRC_HI:
+        s->dma.src_addr = (s->dma.src_addr & lo_mask) + ((val << 32) & hi_mask);
+        break;
+    case GPGPU_REG_DMA_DST_LO:
+        s->dma.dst_addr = (s->dma.dst_addr & hi_mask) + (val & lo_mask);
+        break;
+    case GPGPU_REG_DMA_DST_HI:
+        s->dma.dst_addr = (s->dma.dst_addr & lo_mask) + ((val << 32) & hi_mask);
+        break;
+    case GPGPU_REG_DMA_SIZE:
+        s->dma.size = (uint32_t)val;
+        break;
+    case GPGPU_REG_IRQ_ENABLE:
+        s->irq_enable = (uint32_t)val & 0x7;
+        break;
+    case GPGPU_REG_IRQ_ACK:
+        s->irq_status &= ((~((uint32_t)val & 0x7)) & s->irq_enable);
+        break;
+    case GPGPU_REG_THREAD_ID_X:
+        s->simt.thread_id[0] = (uint32_t)val;
+        break;
+    case GPGPU_REG_THREAD_ID_Y:
+        s->simt.thread_id[1] = (uint32_t)val;
+        break;
+    case GPGPU_REG_THREAD_ID_Z:
+        s->simt.thread_id[2] = (uint32_t)val;
+        break;
+    case GPGPU_REG_BLOCK_ID_X:
+        s->simt.block_id[0] = (uint32_t)val;
+        break;
+    case GPGPU_REG_BLOCK_ID_Y:
+        s->simt.block_id[1] = (uint32_t)val;
+        break;
+    case GPGPU_REG_BLOCK_ID_Z:
+        s->simt.block_id[2] = (uint32_t)val;
+        break;
+    case GPGPU_REG_WARP_ID:
+        s->simt.warp_id = (uint32_t)val;
+        break;
+    case GPGPU_REG_LANE_ID:
+        if (val>=32) {
+            qemu_log_mask(LOG_GUEST_ERROR, "lane %ld >= 32", val);
+            return;
+        }
+        s->simt.lane_id =  (uint32_t)val;
+        break;
+     case GPGPU_REG_THREAD_MASK:
+        s->simt.thread_mask = (uint32_t)val;
+        break;
+    default:
+        break;
+    }
 }
 
 static const MemoryRegionOps gpgpu_ctrl_ops = {
@@ -54,20 +221,24 @@ static const MemoryRegionOps gpgpu_ctrl_ops = {
 /* TODO: Implement VRAM read */
 static uint64_t gpgpu_vram_read(void *opaque, hwaddr addr, unsigned size)
 {
-    (void)opaque;
-    (void)addr;
-    (void)size;
-    return 0;
+    GPGPUState *s = GPGPU(opaque);
+    if (addr >= s->vram_size || addr+size>=s->vram_size || size!= sizeof(uint32_t)) {
+        qemu_log_mask(LOG_GUEST_ERROR, "addr 0x%lx, len 0x%x exceed gpu vram", addr, size);
+        return 0;
+    }
+    return (uint64_t)*(uint32_t*)(s->vram_ptr + addr);
 }
 
 /* TODO: Implement VRAM write */
 static void gpgpu_vram_write(void *opaque, hwaddr addr, uint64_t val,
                              unsigned size)
 {
-    (void)opaque;
-    (void)addr;
-    (void)val;
-    (void)size;
+    GPGPUState *s = GPGPU(opaque);
+    if (addr >= s->vram_size || addr+size>=s->vram_size || size!= sizeof(uint32_t)) {
+        qemu_log_mask(LOG_GUEST_ERROR, "addr 0x%lx, len 0x%x exceed gpu vram", addr, size);
+        return;
+    }
+    *(uint32_t*)(s->vram_ptr + addr) = (uint32_t)val;
 }
 
 static const MemoryRegionOps gpgpu_vram_ops = {
